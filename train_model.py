@@ -1,59 +1,74 @@
 import pandas as pd
+# pyrefly: ignore [missing-import]
+import numpy as np
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, r2_score
+# pyrefly: ignore [missing-import]
+import shap
 
-def execute_model_training(input_path="processed_features.csv"):
-    """Loads engineered feature datasets, splits them chronologically, trains a Random Forest, and audits its brain."""
-    print("Loading engineered feature matrices...")
+def execute_final_production_training(input_path="processed_features.csv"):
+    print("Loading feature assets into production memory...")
     df = pd.read_csv(input_path)
     
-    # 1. Isolate inputs (X) from output targets (y)
-    feature_cols = ["sma_fast", "sma_slow", "price_to_sma_fast", "price_to_sma_slow", "rolling_volatility_24h"]
+    # 1. Feature Pruning: We completely drop the lowest-performing SHAP indicators
+    feature_cols = ["sma_fast", "sma_slow", "price_to_sma_fast", "price_to_sma_slow"]
     X = df[feature_cols]
     y = df["target_return_1h"]
     
-    # 2. Chronological Split (80% Train / 20% Test to prevent data leakage)
+    # 2. Chronological Train/Test Split (80% / 20%)
     split_index = int(len(df) * 0.80)
-    
-    X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+    X_train_raw, X_test_raw = X.iloc[:split_index], X.iloc[split_index:]
     y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
     
-    print("Dataset carved successfully.")
-    print(f"Training Allocation: {X_train.shape[0]} records | Forward Validation Windows: {X_test.shape[0]} records")
+    # 3. Production Feature Standardization (Scaling)
+    # This transforms our data columns so they all share a uniform scale
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_raw)
+    X_test_scaled = scaler.transform(X_test_raw)
     
-    # 3. Model Architecture Initialization (Leveraging multi-core processing)
-    print("\nInitializing Random Forest Regressor and spinning up decision trees...")
-    model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    # Convert back to clean DataFrames so SHAP can read the column labels right
+    X_train = pd.DataFrame(X_train_scaled, columns=feature_cols)
+    X_test = pd.DataFrame(X_test_scaled, columns=feature_cols)
     
-    # 4. Training Execution
-    print("Fitting model parameters against historical patterns...")
+    # 4. Constrained Model Architecture Initialization
+    print("Initializing fully regularized predictive engine...")
+    model = RandomForestRegressor(
+        n_estimators=200,      # Increased trees for smoother variance reductions
+        max_depth=3,           # Further capped depth to strictly enforce macro rules
+        min_samples_leaf=15,   # Increased leaf constraints to eliminate tail-noise
+        random_state=42,
+        n_jobs=-1
+    )
+    
+    print("Fitting standardized parameters against core signals...")
     model.fit(X_train, y_train)
-    print("Model optimization complete.")
     
-    # 5. Prediction Inference
-    print("\nRunning predictive inference across the forward test window...")
+    # 5. Inference Testing
     predictions = model.predict(X_test)
     
-    # 6. Statistical Diagnostics Audit
+    # 6. Final Performance Evaluation Audit
     mae = mean_absolute_error(y_test, predictions)
     r2 = r2_score(y_test, predictions)
     
-    print("\n=== HISTORICAL VALIDATION PERFORMANCE DIAGNOSTICS ===")
-    print(f"Mean Absolute Error (MAE): {mae:.6f} (Average return variance per hour)")
-    print(f"R-Squared (R2) Stability Score: {r2:.4f}")
+    print("\n=== SYSTEM OPTIMIZED PERFORMANCE DIAGNOSTICS ===")
+    print(f"Mean Absolute Error (MAE): {mae:.6f}")
+    print(f"Final Stability Score (R2): {r2:.4f}")
     
-    # 7. Structural Feature Importance Audit (Mean Decrease in Impurity)
-    importances = model.feature_importances_
+    # 7. Explainable AI Verification
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_test)
+    mean_shap_impact = np.abs(shap_values).mean(axis=0)
     
-    importance_matrix = pd.DataFrame({
+    shap_matrix = pd.DataFrame({
         "Feature_Indicator": feature_cols,
-        "Relative_Importance_Weight": importances
-    }).sort_values(by="Relative_Importance_Weight", ascending=False)
+        "Mean_Absolute_SHAP_Impact": mean_shap_impact
+    }).sort_values(by="Mean_Absolute_SHAP_Impact", ascending=False)
     
-    print("\n=== MODEL ARCHITECTURE FEATURE IMPORTANCE WEIGHTS ===")
-    print(importance_matrix.to_string(index=False))
+    print("\n=== VERIFIED EXPLAINABLE AI (SHAP) ATTRIBUTIONS ===")
+    print(shap_matrix.to_string(index=False))
     
     return model
 
 if __name__ == "__main__":
-    trained_model = execute_model_training()
+    production_model = execute_final_production_training()
