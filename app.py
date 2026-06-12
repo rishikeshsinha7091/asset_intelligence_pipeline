@@ -1,103 +1,144 @@
-# pyrefly: ignore [missing-import]
 import streamlit as st
 import pandas as pd
-# pyrefly: ignore [missing-import]
 import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from ingest_data import fetch_market_data
+from datetime import datetime
 
-# Set clean browser page configurations
+# Set browser tab properties
 st.set_page_config(
-    page_title="Asset Intelligence Pipeline",
-    page_icon="📊",
+    page_title="Live Asset Intelligence",
+    page_icon="⚡",
     layout="wide"
 )
 
-@st.cache_data
-def load_and_cache_data():
-    """Loads feature matrices and tracks statistical markers safely across the session cache."""
-    df = pd.read_csv("processed_features.csv")
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+@st.cache_data(ttl=15)
+def fetch_and_engineer_live_stream():
+    """Pings Binance live API, extracts real-time payloads, and converts time zones on the fly."""
+    # 1. Harvest live data up to this exact millisecond
+    raw_candle_data = fetch_market_data(symbol="BTCUSDT", interval="1h", limit=500)
     
-    # Calculate baseline volatility metrics for the metric ribbon
-    raw_df = pd.read_csv("raw_market_data.csv")
-    mean_spread = (raw_df["high"] - raw_df["low"]).mean()
-    std_spread = (raw_df["high"] - raw_df["low"]).std()
-    raw_df["z_score"] = ((raw_df["high"] - raw_df["low"]) - mean_spread) / std_spread
-    anomalies_df = raw_df[raw_df["z_score"] > 3].copy()
-    anomalies_df["timestamp"] = pd.to_datetime(anomalies_df["timestamp"], unit="ms")
+    # 2. Parse into a functional DataFrame matrix core
+    headers = ["timestamp", "open", "high", "low", "close", "volume"]
+    clean_rows = []
+    for candle in raw_candle_data:
+        clean_rows.append([
+            int(candle[0]), float(candle[1]), float(candle[2]),
+            float(candle[3]), float(candle[4]), float(candle[5])
+        ])
+    
+    df = pd.DataFrame(clean_rows, columns=headers)
+    
+    # CRITICAL TIMEZONE CONVERSION: Map naive UTC from API directly to local time (IST)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df["timestamp"] = df["timestamp"].dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+    
+    df = df.sort_values(by="timestamp").reset_index(drop=True)
+    
+    # 3. Dynamic Feature Engineering
+    df["sma_fast"] = df["close"].rolling(window=6).mean()
+    df["sma_slow"] = df["close"].rolling(window=24).mean()
+    df["price_to_sma_fast"] = df["close"] / df["sma_fast"]
+    df["price_to_sma_slow"] = df["close"] / df["sma_slow"]
+    
+    # Calculate live Z-Scores for the anomaly scanner
+    df["hourly_spread"] = df["high"] - df["low"]
+    mean_spread = df["hourly_spread"].mean()
+    std_spread = df["hourly_spread"].std()
+    df["z_score"] = (df["hourly_spread"] - mean_spread) / std_spread
+    
+    # Create clean anomaly frames
+    anomalies_df = df[df["z_score"] > 3].copy()
     
     return df, anomalies_df
 
-# Load datasets into application memory
-df, anomalies = load_and_cache_data()
+# Launch live data engine pipeline
+with st.spinner("Pinging global exchange servers for real-time asset data..."):
+    live_df, live_anomalies = fetch_and_engineer_live_stream()
 
-# --- HEADER SECTION ---
-st.title("📊 Real-Time Asset Intelligence & MLOps Pipeline")
-st.markdown("An institutional-grade time-series forecasting and statistical anomaly detection dashboard tracking **Bitcoin (BTC/USDT)** metrics.")
+# Capture precise execution wall-clock time down to the second
+sync_time = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
+
+# --- BACKEND MODEL TRAINING CORE ---
+train_df = live_df.dropna().reset_index(drop=True)
+feature_cols = ["sma_fast", "sma_slow", "price_to_sma_fast", "price_to_sma_slow"]
+X_raw = train_df[feature_cols].iloc[:-1]
+y = (train_df["close"].shift(-1) - train_df["close"]) / train_df["close"]
+y = y.dropna()
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_raw)
+
+model = RandomForestRegressor(n_estimators=100, max_depth=3, min_samples_leaf=15, random_state=42, n_jobs=-1)
+model.fit(X_scaled, y)
+
+# --- USER INTERFACE DESIGN ---
+st.title("⚡ Live Production Asset Forecasting Pipeline")
+
+# Live System Heartbeat Container
+st.info(f"🟢 **Live Pipeline Heartbeat:** Connected to exchange endpoints. Last database synchronization verified at: **{sync_time}**")
 st.write("---")
 
-# --- LAYER 1: METRIC SUMMARY RIBBON ---
-latest_row = df.iloc[-1]
-previous_row = df.iloc[-2]
-
-# Calculate directional variance string indicators
-price_delta = latest_row['close'] - previous_row['close']
-vol_delta = latest_row['volume'] - previous_row['volume']
+# SUMMARY METRIC FLOATS
+latest_bar = live_df.iloc[-1]
+prev_bar = live_df.iloc[-2]
+price_change = latest_bar['close'] - prev_bar['close']
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric(
-        label="Latest Closing Price",
-        value=f"${latest_row['close']:.2f}",
-        delta=f"${price_delta:.2f} (Past Hour)"
-    )
+    st.metric(label="LIVE BITCOIN PRICE", value=f"${latest_bar['close']:.2f}", delta=f"${price_change:.2f} (Past 60m)")
 with col2:
-    st.metric(
-        label="Hourly Transaction Volume",
-        value=f"{latest_row['volume']:.2f} BTC",
-        delta=f"{vol_delta:.2f} BTC"
-    )
+    st.metric(label="CURRENT BAR VOLUME", value=f"{latest_bar['volume']:.2f} BTC", delta=f"{(latest_bar['volume'] - prev_bar['volume']):.2f} vs Prev Hour")
 with col3:
-    st.metric(
-        label="Total Captured Volatility Anomalies",
-        value=f"{len(anomalies)} Events",
-        delta="Z-Score > 3 Threshold",
-        delta_color="inverse"
-    )
+    st.metric(label="STREAMING WINDOW", value="ONLINE", delta="API STREAM ACTIVE", delta_color="normal")
 
 st.write("---")
 
-# --- LAYER 2: INTERACTIVE DATA TRACKING BLOCKS ---
-left_panel, right_panel = st.columns([1, 1])
+# --- LIVE STREAM TICKER FEED ---
+st.subheader("⏱️ Live Market Activity Ticker (Most Recent 5 Hours)")
+st.markdown("Exposing raw physical block timestamps streaming straight off the network wire to verify data continuity.")
 
-with left_panel:
-    st.subheader("🚨 Statistical Volatility Anomaly Deck")
-    st.markdown("High-signal historical hours filtered out via multi-dimensional standard deviation modeling.")
-    
-    # Render a clean, filterable data deck frame
-    clean_anomalies = anomalies[["timestamp", "open", "high", "low", "close", "z_score"]].sort_values(by="timestamp", ascending=False)
-    st.dataframe(clean_anomalies, use_container_width=True, hide_index=True)
+recent_feed = live_df.tail(5)[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+recent_feed = recent_feed.sort_values(by="timestamp", ascending=False)
 
-with right_panel:
-    st.subheader("🤖 Predictive Optimization Engine")
-    st.markdown("Real-time forward forecasting data extracted via our regularized Random Forest backend model.")
+# Clean string formatting retaining localized timezone configurations
+recent_feed["timestamp"] = recent_feed["timestamp"].dt.strftime("%Y-%m-%d | %I:%M %p")
+
+st.dataframe(recent_feed, use_container_width=True, hide_index=True)
+st.write("---")
+
+# RE-ALIGNED CORE BLOCKS
+left_deck, right_deck = st.columns([1, 1])
+
+with left_deck:
+    st.subheader("🚨 Live Detected Volatility Anomalies")
+    if len(live_anomalies) > 0:
+        clean_anomalies = live_anomalies[["timestamp", "open", "high", "low", "close", "z_score"]].copy()
+        clean_anomalies["timestamp"] = clean_anomalies["timestamp"].dt.strftime("%Y-%m-%d | %I:%M %p")
+        st.dataframe(
+            clean_anomalies.sort_values(by="timestamp", ascending=False),
+            use_container_width=True, hide_index=True
+        )
+    else:
+        st.info("Market volatility conditions normal. Zero Z-Score outliers detected in active window.")
+
+with right_deck:
+    st.subheader("🔮 Live Production Inference Engine")
+    st.markdown("Feeding the final real-time feature vector straight into the trained Random Forest model split:")
     
-    # Compute mockup interactive prediction controls using actual dataset bounds
-    st.markdown("### Active Feature Signal Input Matrix")
+    st.write(f"**Current Fast Trend (6h SMA):** ${latest_bar['sma_fast']:.2f}")
+    st.write(f"**Current Macro Trend (24h SMA):** ${latest_bar['sma_slow']:.2f}")
+    st.write(f"**Current Deviation Matrix Ratio:** {latest_bar['price_to_sma_fast']:.4f}")
     
-    selected_time = st.selectbox("Select Timeline Historical Hour Segment to Run Inference:", df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist())
-    target_record = df[df["timestamp"] == pd.to_datetime(selected_time)].iloc[0]
+    current_features = np.array([[latest_bar['sma_fast'], latest_bar['sma_slow'], latest_bar['price_to_sma_fast'], latest_bar['price_to_sma_slow']]])
+    current_features_scaled = scaler.transform(current_features)
     
-    # Display features driving the calculation inside a clean list presentation
-    st.write(f"**Fast Trend (6h SMA):** ${target_record['sma_fast']:.2f}")
-    st.write(f"**Macro Trend (24h SMA):** ${target_record['sma_slow']:.2f}")
-    st.write(f"**Price-to-Trend Momentum Ratio:** {target_record['price_to_sma_fast']:.4f}")
-    
-    # Mock directional prediction outcome mapping based on true target boundaries
-    future_return_signal = target_record['target_return_1h']
+    live_prediction = model.predict(current_features_scaled)[0]
     
     st.markdown("---")
-    st.markdown("### Automated Model Inference Output")
-    if future_return_signal > 0:
-        st.success(f"📈 **BULLISH FORECAST FOR UPCOMING HOUR:** Expected Return Direction: +{future_return_signal*100:.3f}%")
+    st.markdown("### Model Forward Projection Output")
+    if live_prediction > 0:
+        st.success(f"📈 **BULLISH EXPECTATION FORECAST:** Model projects a positive upcoming close move: +{live_prediction*100:.4f}%")
     else:
-        st.error(f"📉 **BEARISH FORECAST FOR UPCOMING HOUR:** Expected Return Direction: {future_return_signal*100:.3f}%")
+        st.error(f"📉 **BEARISH EXPECTATION FORECAST:** Model projects a negative upcoming close move: {live_prediction*100:.4f}%")
